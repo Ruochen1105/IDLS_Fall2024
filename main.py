@@ -5,59 +5,17 @@ from typing import Dict, List
 import logging
 import json
 import warnings
-import os
-import kagglehub
 import torch
-from dotenv import load_dotenv
-from sklearn.preprocessing import LabelEncoder
-from torch.utils.data import DataLoader, Dataset
 
 warnings.filterwarnings('ignore')
-
-class ResumeDataset(Dataset):
-    def __init__(self, dataframe):
-        self.df = dataframe
-        self.df["received_callback"] = pd.to_numeric(self.df["received_callback"], errors='coerce')
-        self.labels = self.df["received_callback"].values
-        
-        # Convert resume_quality to numeric
-        self.df["resume_quality"] = (self.df["resume_quality"] == "low").astype(int)
-        
-        self.string_columns = ["job_industry", "job_type", "job_ownership"]
-        self.label_encoders = {col: LabelEncoder() for col in self.string_columns}
-        
-        for col in self.string_columns:
-            self.df[col] = self.df[col].astype(str)
-            self.df[col] = self.label_encoders[col].fit_transform(self.df[col])
-        
-        drop_columns = ["received_callback", "job_ad_id", "job_city", "firstname"]
-        features_df = self.df.drop(columns=drop_columns)
-        
-        for col in features_df.columns:
-            features_df[col] = pd.to_numeric(features_df[col], errors='coerce').fillna(-1)
-        
-        self.features = features_df
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        features = torch.tensor(self.features.iloc[idx].values, dtype=torch.float32)
-        label = torch.tensor(self.labels[idx], dtype=torch.long)
-        return features, label
-
-    def return_label_encoders(self):
-        return self.label_encoders
 
 class ResumeDataAnalyzer:
     def __init__(self, df: pd.DataFrame):
         self.model_name = "gpt2"
         print(f"Initializing model: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, pad_token='<|endoftext|>')
-        self.model = pipeline('text-generation', model=self.model_name, tokenizer=self.tokenizer, truncation=True)
+        self.model = pipeline('text-generation', model=self.model_name, tokenizer=self.tokenizer, truncation=True, device=0 if torch.cuda.is_available() else -1)
         self.df = df
-        self.dataset = ResumeDataset(df)
-        self.label_encoders = self.dataset.return_label_encoders()
         self.dataset_stats = self.compute_dataset_stats()
 
     def compute_dataset_stats(self) -> Dict:
@@ -138,8 +96,8 @@ class ResumeDataAnalyzer:
         return importance
 
     def create_context_aware_prompt(self, row: pd.Series) -> str:
-        job_type = self.label_encoders['job_type'].inverse_transform([row['job_type']])[0]
-        industry = self.label_encoders['job_industry'].inverse_transform([row['job_industry']])[0]
+        job_type = row.get('job_type', 'unknown')
+        industry = row.get('job_industry', 'unknown')
         experience = str(row['years_experience']) + " years" if row['years_experience'] != -1 else "unknown"
 
         skills = []
@@ -161,23 +119,25 @@ class ResumeDataAnalyzer:
         prompt = f"""As an expert resume analyzer with access to {self.dataset_stats['total_resumes']} resumes, review this candidate:
 POSITION: {job_type} in {industry}
 MARKET CONTEXT:
-* Industry callback rate: {self.dataset_stats['industry_callback_rates'][row['job_industry']]['callback_rate']:.1%}
-* Similar position callback rate: {self.dataset_stats['job_type_callback_rates'][row['job_type']]['callback_rate']:.1%}
-* Typical successful experience: {self.dataset_stats['job_type_callback_rates'][row['job_type']]['avg_experience']:.1f} years
+* Industry callback rate: {self.dataset_stats['industry_callback_rates'][industry]['callback_rate']:.1%}
+* Similar position callback rate: {self.dataset_stats['job_type_callback_rates'][job_type]['callback_rate']:.1%}
+* Typical successful experience: {self.dataset_stats['job_type_callback_rates'][job_type]['avg_experience']:.1f} years
 CANDIDATE PROFILE:
 * Experience: {experience}
 * Skills: {', '.join(skills) if skills else 'No specific skills listed'}
 * Qualifications: {', '.join(qualifications) if qualifications else 'None'}
-* Resume Quality: {'low' if row.get('resume_quality', 0) == 1 else 'high'}
+* Resume Quality: {row.get('resume_quality', 'unknown')}
 * Employment Gaps: {'Yes' if row.get('employment_holes', 0) == 1 else 'No'}
 SUCCESS PATTERNS IN THIS FIELD:
 * Most impactful qualifications: {', '.join(k for k, v in self.dataset_stats['success_factors'].items() if isinstance(v, dict) and v.get('positive_impact', False))}
-* Required skills impact: {self.dataset_stats['skill_importance'][row['job_type']].get('computer_skills', 0):.1%} callback difference
-Based on this data, provide:
+* Required skills impact: {self.dataset_stats['skill_importance'][job_type].get('computer_skills', 0):.1%} callback difference
+Based on this data's statistics, provide details on:
 1. CALLBACK DECISION (Yes/No) with specific reasoning
 2. STRENGTHS vs. successful candidates
 3. GAPS vs. successful candidates
 4. SPECIFIC IMPROVEMENTS based on success patterns
+
+Use your intelligence to come up with the above 4 details for this candidate
 """
         return prompt
 
@@ -186,6 +146,7 @@ Based on this data, provide:
             prompt = self.create_context_aware_prompt(row)
             response = self.model(prompt, max_new_tokens=300, num_return_sequences=1, temperature=0.7)
             analysis = self.parse_response(response[0]['generated_text'])
+            print('Analysis@@@@@@@@ ', analysis)
             analysis['context'] = {
                 'industry_stats': self.dataset_stats['industry_callback_rates'][row['job_industry']],
                 'job_type_stats': self.dataset_stats['job_type_callback_rates'][row['job_type']]
@@ -206,11 +167,12 @@ Based on this data, provide:
             'improvements': []
         }
         try:
-            callback_recommended = 'yes' in text.lower().split('CALLBACK DECISION')[1].split('\n')[0].lower()
             parts = text.split('\n')
             current_section = ''
             for part in parts:
-                if 'STRENGTHS' in part:
+                if 'CALLBACK DECISION' in part:
+                    sections['callback_decision'] = part.split(':')[-1].strip()
+                elif 'STRENGTHS' in part:
                     current_section = 'strengths'
                 elif 'GAPS' in part:
                     current_section = 'gaps'
@@ -218,6 +180,9 @@ Based on this data, provide:
                     current_section = 'improvements'
                 elif part.strip() and current_section:
                     sections[current_section].append(part.strip())
+            
+            callback_recommended = 'yes' in sections['callback_decision'].lower()
+            
             return {
                 'callback_recommended': callback_recommended,
                 'analysis': sections,
@@ -231,14 +196,6 @@ Based on this data, provide:
                 'full_text': text,
                 'error': str(e)
             }
-
-def create_dataframe():
-    load_dotenv()
-    path = kagglehub.dataset_download("utkarshx27/which-resume-attributes-drive-job-callbacks")
-    data_file_path = os.path.join(path, "resume.csv")
-    df = pd.read_csv(data_file_path)
-    df.fillna(-1, inplace=True)
-    return df
 
 def main():
     print("Loading and analyzing resume data...")
@@ -263,7 +220,7 @@ def main():
     print("\nSample Analysis Results:")
     for i, result in enumerate(results, 1):
         print(f"\nResume {i}:")
-        print("-" * 40)
+        print("=" * 50)
         if 'error' not in result:
             print(f"Recommendation: {'Callback' if result['callback_recommended'] else 'No Callback'}")
             print(f"Actual: {'Callback' if result['actual_callback'] else 'No Callback'}")
