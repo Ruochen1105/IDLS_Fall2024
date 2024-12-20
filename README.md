@@ -25,3 +25,13 @@ This repository provides a modular framework for fine-tuning and evaluating stat
 2.  The default dataset used is cnamuangtoun/resume-job-description-fit. You can replace this with another dataset by modifying the load_dataset method.
 
 For prompt engineering and using fine-tuning with prompt engineering, follow the guidelines mentioned in the respective jupyter notebooks
+
+## Results and Analysis
+#### Reproducibility
+ - Use the same random seeds and hyperparameters to reproduce results.
+#### Metrics
+Evaluate model performance with:
+1. Precision
+2. Recall
+3. F1-score
+4. Accuracy
