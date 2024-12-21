@@ -24,7 +24,9 @@ This repository provides a modular framework for fine-tuning and evaluating stat
 1.  Load, finetune, run and evaluate the model: python Fine\ Tuning.py. Customize model parameters: Modify parameters like epochs, learning_rate, and warmup_steps in the fine_tune method.
 2.  The default dataset used is cnamuangtoun/resume-job-description-fit. You can replace this with another dataset by modifying the load_dataset method.
 
-For prompt engineering and using fine-tuning with prompt engineering, follow the guidelines mentioned in the respective jupyter notebooks
+For prompt engineering and using fine-tuning with prompt engineering, follow the guidelines mentioned in the respective jupyter notebooks.
+
+Dataset_Analysis.ipynb contains code to analyze and extract statistics from the dataset.
 
 ## Results and Analysis
 #### Reproducibility
